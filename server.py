@@ -215,41 +215,60 @@ def _watchdog_loop():
 
 
 def _split_text(text, max_chars):
-    """Split text into <=max_chars chunks on sentence boundaries.
+    """Split text into chunks on sentence/line boundaries, avoiding tiny fragments.
 
     Generation memory grows with input length, so long inputs must be chunked to
-    stay within the device memory budget. Very long single sentences are hard-split
-    on word boundaries as a fallback.
+    stay within the device memory budget. But the model tends to *ramble* (sampling
+    toward its token cap) when handed a short fragment like a title or a one-line
+    paragraph — so we merge sub-`min_chars` pieces into a neighbour, allowing a
+    chunk to grow up to `hard_max` to absorb them. Sentences longer than a whole
+    chunk are hard-split on word boundaries.
     """
     import re
+    hard_max = int(max_chars * 1.3)          # ceiling when absorbing a short fragment
+    min_chars = max(40, max_chars // 6)      # anything shorter is a "tiny" fragment
     parts = re.split(r"(?<=[.!?…])\s+|\n+", text.strip())
-    chunks, cur = [], ""
 
-    def flush():
-        nonlocal cur
-        if cur.strip():
-            chunks.append(cur.strip())
-        cur = ""
-
+    # 1) Break parts that are longer than a whole chunk into word-bounded atoms.
+    atoms = []
     for p in (s.strip() for s in parts):
         if not p:
             continue
-        if len(p) > max_chars:               # sentence longer than a whole chunk
-            flush()
-            buf = ""
-            for w in p.split():
-                if buf and len(buf) + len(w) + 1 > max_chars:
-                    chunks.append(buf)
-                    buf = ""
-                buf = f"{buf} {w}".strip()
-            if buf:
-                chunks.append(buf)
+        if len(p) <= max_chars:
+            atoms.append(p)
             continue
-        if cur and len(cur) + len(p) + 1 > max_chars:
-            flush()
-        cur = f"{cur} {p}".strip()
-    flush()
-    return chunks or [text.strip()]
+        buf = ""
+        for w in p.split():
+            if buf and len(buf) + len(w) + 1 > max_chars:
+                atoms.append(buf)
+                buf = ""
+            buf = f"{buf} {w}".strip()
+        if buf:
+            atoms.append(buf)
+
+    # 2) Greedily pack atoms; absorb extra into a still-too-short chunk.
+    chunks, cur = [], ""
+    for a in atoms:
+        if not cur:
+            cur = a
+        elif (len(cur) + len(a) + 1 <= max_chars
+              or (len(cur) < min_chars and len(cur) + len(a) + 1 <= hard_max)):
+            cur = f"{cur} {a}"
+        else:
+            chunks.append(cur)
+            cur = a
+    if cur:
+        chunks.append(cur)
+
+    # 3) Fold any leftover tiny chunk into an adjacent one (e.g. a trailing line).
+    out = []
+    for c in chunks:
+        if out and (len(c) < min_chars or len(out[-1]) < min_chars) \
+                and len(out[-1]) + len(c) + 1 <= hard_max:
+            out[-1] = f"{out[-1]} {c}"
+        else:
+            out.append(c)
+    return out or [text.strip()]
 
 
 def _voice_by_id(voice_id):
