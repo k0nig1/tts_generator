@@ -43,21 +43,29 @@ http://localhost:5050
 
 ---
 
-## Apple Silicon (M-series)
+## Device selection (Apple Silicon)
 
-The server auto-selects the best device: **MPS** (Apple GPU) → CUDA → CPU, with an
-automatic CPU fallback if MPS fails to load. `PYTORCH_ENABLE_MPS_FALLBACK=1` is set
-for you so unimplemented MPS ops fall back to CPU instead of crashing.
+The server auto-selects: CUDA → MPS (only if the machine has enough RAM) → CPU.
 
-Generation is **slow** on a Mac — measured ~7× real-time on an M3 via MPS (a 7s clip
-took ~52s; model load adds ~11s once at boot). Fine for generating clips you wait on;
-not for live/interactive use. Try `TTS_DEVICE=cpu` too — with MPS op-fallback churn,
-clean CPU is sometimes comparable or faster.
+**Why the RAM check:** generating this model on **MPS peaks ~24 GB** of unified
+memory. On a Mac with less than ~32 GB that overflows into swap, which both *crawls*
+(swap thrash) and once **crashed the machine** with an out-of-memory restart. So on
+≤16–24 GB Macs the server picks **CPU**, which has a flat ~6 GB footprint and is
+actually faster in practice (no paging). Measured on a 16 GB M3:
 
-Override the device if needed:
+| Device | Peak RAM | Speed | Notes |
+|--------|----------|-------|-------|
+| MPS    | ~24 GB   | crawls under ~13 GB swap | unusable / crashed the machine |
+| CPU    | ~6 GB    | ~4–5× real-time, steady  | the safe default here |
+
+So generation is **not** instant — budget ~4–5× the clip length on CPU (a 20s clip
+≈ ~100s), plus a one-time ~8s model load. Fine for clips you wait on; not live use.
+
+Override the auto-pick:
 ```bash
-TTS_DEVICE=cpu python server.py     # force CPU
-TTS_DEVICE=mps python server.py     # force MPS
+TTS_DEVICE=cpu python server.py            # force CPU
+TTS_DEVICE=mps python server.py            # force MPS (needs lots of RAM)
+TTS_MPS_MIN_RAM_GB=24 python server.py     # lower the MPS RAM threshold
 ```
 
 ## Stopping

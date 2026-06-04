@@ -33,6 +33,9 @@ MAX_CHARS = int(os.environ.get("TTS_MAX_CHARS", "400"))
 # genuine hang. Per-chunk token budgeting (see worker) already bounds normal work,
 # so this only needs to catch a truly wedged process; keep it generous.
 CHUNK_TIMEOUT = int(os.environ.get("TTS_CHUNK_TIMEOUT", "420"))
+# MPS peaks ~24GB generating this model; below this much total RAM it swaps and
+# crawls, so we auto-pick CPU instead (set TTS_DEVICE to override either way).
+MPS_MIN_RAM_GB = int(os.environ.get("TTS_MPS_MIN_RAM_GB", "32"))
 
 # Curated German preset library. `file` is a reference clip in ./voices that
 # Chatterbox clones. Add a voice by dropping a clean ~10-15s mono WAV in ./voices
@@ -54,12 +57,21 @@ def _worker_main(request_q, response_q, language, forced_device):
     import torch
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
+    def total_ram_gb():
+        try:
+            import subprocess
+            return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"])) / (1024 ** 3)
+        except Exception:
+            return 0  # unknown -> treat as low and prefer CPU (safe)
+
     if forced_device:
         device = forced_device
-    elif torch.backends.mps.is_available():
-        device = "mps"
     elif torch.cuda.is_available():
         device = "cuda"
+    elif torch.backends.mps.is_available() and total_ram_gb() >= MPS_MIN_RAM_GB:
+        # MPS peaks ~24GB while generating; only worth it with enough unified RAM,
+        # else it swaps and crawls. Below the threshold, CPU is faster and safe.
+        device = "mps"
     else:
         device = "cpu"
 
