@@ -60,6 +60,13 @@ TTS_DEVICE=cpu python server.py     # force CPU
 TTS_DEVICE=mps python server.py     # force MPS
 ```
 
+## Stopping
+
+Stop the server with **Ctrl+C** (or close the terminal). The generation runs in a
+worker subprocess that's reaped on exit; if the server is force-killed (`kill -9`),
+the orphaned worker self-terminates within ~5s so it never lingers holding the
+model in memory. To check for strays: `pgrep -fl spawn_main`.
+
 ## German voices
 
 | Voice ID      | Name   | Style              | Source clip                   |

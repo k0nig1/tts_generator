@@ -29,10 +29,10 @@ LANGUAGE = os.environ.get("TTS_LANGUAGE", "de")
 # Chunk long inputs so peak memory stays bounded (generation memory grows with
 # input length). 400 tested safe on a 20GB MPS pool; lower if you hit OOM.
 MAX_CHARS = int(os.environ.get("TTS_MAX_CHARS", "400"))
-# Safety net: if a single chunk takes longer than this (seconds), assume the model
-# is running away to its token cap, kill the worker and fail the job. Generous
-# enough for a slow-but-normal chunk; a runaway hits the 1000-token cap (~10 min).
-CHUNK_TIMEOUT = int(os.environ.get("TTS_CHUNK_TIMEOUT", "240"))
+# Safety net: kill the worker if a chunk produces no progress for this long — a
+# genuine hang. Per-chunk token budgeting (see worker) already bounds normal work,
+# so this only needs to catch a truly wedged process; keep it generous.
+CHUNK_TIMEOUT = int(os.environ.get("TTS_CHUNK_TIMEOUT", "420"))
 
 # Curated German preset library. `file` is a reference clip in ./voices that
 # Chatterbox clones. Add a voice by dropping a clean ~10-15s mono WAV in ./voices
@@ -68,6 +68,17 @@ def _worker_main(request_q, response_q, language, forced_device):
     except Exception:
         device = "cpu"
         model = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
+
+    # The library hardcodes max_new_tokens=1000 in generate(); a chunk that fails to
+    # emit end-of-speech then grinds to that cap (slow, stretched audio, watchdog
+    # kills). Patch the T3 inference to honour a per-chunk cap sized to the text.
+    _cap = {"v": 1000}
+    _orig_inference = model.t3.inference
+    def _capped_inference(*a, **k):
+        k["max_new_tokens"] = _cap["v"]
+        return _orig_inference(*a, **k)
+    model.t3.inference = _capped_inference
+
     response_q.put({"type": "ready", "device": device})
 
     def free():
@@ -77,13 +88,23 @@ def _worker_main(request_q, response_q, language, forced_device):
             torch.cuda.empty_cache()
 
     while True:
-        job = request_q.get()
+        # Self-terminate if orphaned (parent died) so we never linger holding the
+        # model in memory — this is what caused runaway RAM use before.
+        if os.getppid() == 1:
+            break
+        try:
+            job = request_q.get(timeout=5)
+        except queue.Empty:
+            continue
         if job is None:  # shutdown sentinel
             break
         jid = job["job_id"]
         try:
             pieces = []
             for i, chunk in enumerate(job["chunks"]):
+                # Budget tokens to roughly what this chunk needs (+headroom), so a
+                # runaway is cut off early instead of sampling to 1000.
+                _cap["v"] = min(1000, int(len(chunk) * 1.5) + 120)
                 with torch.inference_mode():  # no autograd graph -> far less memory
                     wav = model.generate(
                         chunk,
@@ -185,12 +206,21 @@ def _ensure_worker():
         _spawn_worker()
 
 
+def _kill_proc(proc):
+    """Terminate a worker, escalating to SIGKILL so it can't linger holding the model."""
+    if proc is None or not proc.is_alive():
+        return
+    proc.terminate()
+    proc.join(timeout=5)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=5)
+
+
 def _restart_worker():
     """Terminate the running worker (killing any in-flight generation) and respawn."""
     global _proc
-    if _proc is not None and _proc.is_alive():
-        _proc.terminate()
-        _proc.join(timeout=5)
+    _kill_proc(_proc)
     _spawn_worker()
 
 
@@ -368,10 +398,15 @@ def status():
 
 
 if __name__ == "__main__":
+    import atexit
     print("\n🎙  German TTS (Chatterbox Multilingual) at http://localhost:5050")
+    atexit.register(lambda: _kill_proc(_proc))  # never orphan the worker on exit
     threading.Thread(target=_watchdog_loop, daemon=True).start()
     if os.environ.get("TTS_PRELOAD", "1") == "1":
         # Warm the worker (and model) at boot so the first request isn't slow.
         with _worker_lock:
             _ensure_worker()
-    app.run(port=5050, debug=False, threaded=True)
+    try:
+        app.run(port=5050, debug=False, threaded=True)
+    finally:
+        _kill_proc(_proc)
