@@ -21,6 +21,14 @@ uv pip install --python .venv -r requirements.txt
 This pulls PyTorch and the Chatterbox model code (~a few GB).
 
 ### 2. Start the server
+
+Quickest — one command that sets up the venv on first run, starts the server, and
+opens the browser when ready:
+```bash
+./run.sh
+```
+
+Or manually:
 ```bash
 source .venv/bin/activate
 python server.py
