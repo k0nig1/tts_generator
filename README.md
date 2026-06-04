@@ -104,9 +104,9 @@ animated stretch (~320s) for a livelier voice; `helmut_calm` uses the calmer int
   more dramatic. For language learning, keep it moderate.
 - Audio is generated as WAV and downloads as WAV. **Every generation is also
   auto-saved** to `output/<timestamp>_<voice>.wav` (gitignored) — your artifact archive.
-- Paragraphs (blank-line separated) get a longer pause than sentence breaks, so a
-  title/heading isn't run into the first sentence. Tune via `TTS_PARA_GAP` /
-  `TTS_SENT_GAP`.
+- A punctuation-less paragraph (e.g. a title/heading) gets a period appended so the
+  narrator pauses instead of running it into the next sentence. Pauses otherwise come
+  from the text's own punctuation; the small gap between chunks is `TTS_SENT_GAP`.
 - **Long text** is auto-split into ≤400-char chunks (sentence boundaries) so it
   won't exhaust memory; the UI shows a per-chunk progress bar ("Teil 3 / 11").
   Tune the chunk size with `TTS_MAX_CHARS=300 python server.py` if you hit OOM.

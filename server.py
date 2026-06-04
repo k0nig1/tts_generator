@@ -36,10 +36,9 @@ CHUNK_TIMEOUT = int(os.environ.get("TTS_CHUNK_TIMEOUT", "420"))
 # MPS peaks ~24GB generating this model; below this much total RAM it swaps and
 # crawls, so we auto-pick CPU instead (set TTS_DEVICE to override either way).
 MPS_MIN_RAM_GB = int(os.environ.get("TTS_MPS_MIN_RAM_GB", "32"))
-# Silence inserted between stitched chunks: a short beat between sentences, a longer
-# pause at paragraph boundaries (so titles/paragraphs don't run together).
+# Silence inserted between stitched chunks (a short beat; within-chunk pauses come
+# from the text's own punctuation).
 SENT_GAP = float(os.environ.get("TTS_SENT_GAP", "0.18"))
-PARA_GAP = float(os.environ.get("TTS_PARA_GAP", "0.5"))
 # Every generation is also saved here as <timestamp>_<voice>.wav (gitignored).
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
@@ -304,55 +303,55 @@ def _watchdog_loop():
 
 
 def _split_text(text, max_chars):
-    """Split text into (chunk_text, gap_after_seconds), preserving paragraph structure.
+    """Split text into (chunk_text, gap_after_seconds) chunks for generation.
 
-    Paragraphs (blank-line separated, e.g. a title or a one-line of dialogue) become
-    their own chunk(s) with a longer pause after, so the narrator doesn't run a title
-    straight into the first sentence. Within a paragraph, sentences are packed up to
-    max_chars and separated by a short pause. Overlong sentences are hard-split on
-    word boundaries. The per-chunk token cap (see worker) prevents short chunks from
-    rambling, so we no longer merge fragments across paragraphs.
+    The model pauses naturally at punctuation, so rather than splitting on every
+    paragraph (which makes short dialogue lines choppy), we pack sentences greedily
+    up to max_chars — but ensure each paragraph ends with terminal punctuation, so a
+    heading/title with none isn't run straight into the next sentence. Overlong
+    sentences are hard-split on word boundaries; the worker's token cap keeps any
+    single chunk from rambling.
     """
     import re
-    out = []
+    # Sentence units, with a period added to punctuation-less paragraph ends (titles).
+    units = []
     for para in re.split(r"\n\s*\n+", text.strip()):
-        para = " ".join(para.split())          # collapse internal newlines/spaces
+        para = " ".join(para.split())
         if not para:
             continue
-        # Sentences within the paragraph, hard-splitting any overlong one.
-        atoms = []
-        for s in (x.strip() for x in re.split(r"(?<=[.!?…])\s+", para)):
-            if not s:
-                continue
-            if len(s) <= max_chars:
-                atoms.append(s)
-                continue
-            buf = ""
-            for w in s.split():
-                if buf and len(buf) + len(w) + 1 > max_chars:
-                    atoms.append(buf)
-                    buf = ""
-                buf = f"{buf} {w}".strip()
-            if buf:
-                atoms.append(buf)
-        # Pack sentences into <=max_chars chunks.
-        para_chunks, cur = [], ""
-        for a in atoms:
-            if not cur:
-                cur = a
-            elif len(cur) + len(a) + 1 <= max_chars:
-                cur = f"{cur} {a}"
-            else:
-                para_chunks.append(cur)
-                cur = a
-        if cur:
-            para_chunks.append(cur)
-        # Short gap between sentence-chunks; longer gap after the last (paragraph end).
-        for j, c in enumerate(para_chunks):
-            out.append([c, PARA_GAP if j == len(para_chunks) - 1 else SENT_GAP])
+        sents = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", para) if s.strip()]
+        if sents and sents[-1][-1] not in ".!?…:\"'»":
+            sents[-1] += "."
+        units.extend(sents)
 
-    if not out:
-        out = [[text.strip(), 0.0]]
+    # Hard-split overlong sentences, then pack units greedily up to max_chars.
+    atoms = []
+    for u in units:
+        if len(u) <= max_chars:
+            atoms.append(u)
+            continue
+        buf = ""
+        for w in u.split():
+            if buf and len(buf) + len(w) + 1 > max_chars:
+                atoms.append(buf)
+                buf = ""
+            buf = f"{buf} {w}".strip()
+        if buf:
+            atoms.append(buf)
+
+    chunks, cur = [], ""
+    for a in atoms:
+        if not cur:
+            cur = a
+        elif len(cur) + len(a) + 1 <= max_chars:
+            cur = f"{cur} {a}"
+        else:
+            chunks.append(cur)
+            cur = a
+    if cur:
+        chunks.append(cur)
+
+    out = [[c, SENT_GAP] for c in chunks] or [[text.strip(), 0.0]]
     out[-1][1] = 0.0  # no trailing gap on the very last chunk
     return out
 
