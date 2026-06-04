@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Generated / downloaded audio (reference clips in voices/ are kept on purpose)
+/*.wav
+tts_*.wav
+
+# Local env overrides
+.env

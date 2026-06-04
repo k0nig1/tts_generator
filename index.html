@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deutsch TTS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --ink:     #1a1714;
+    --paper:   #f5f0e8;
+    --cream:   #ede7d9;
+    --rule:    #c8bfad;
+    --accent:  #2d5a3d;
+    --accent2: #8b3a1e;
+    --muted:   #7a7065;
+    --warn:    #c0392b;
+  }
+
+  body {
+    font-family: 'DM Mono', monospace;
+    background: var(--paper);
+    color: var(--ink);
+    min-height: 100vh;
+    padding: 2rem 1rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  /* Subtle ruled paper lines */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 31px,
+      var(--rule) 31px,
+      var(--rule) 32px
+    );
+    opacity: 0.25;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 680px;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 2.5rem;
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 0.75rem;
+  }
+
+  header h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 2.4rem;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+
+  header .sub {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--rule);
+    margin-left: auto;
+    margin-bottom: 4px;
+    flex-shrink: 0;
+    transition: background 0.4s;
+  }
+  .status-dot.ok  { background: var(--accent); }
+  .status-dot.err { background: var(--warn); }
+
+  /* --- textarea --- */
+  .field-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--muted);
+    margin-bottom: 0.4rem;
+    display: block;
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 180px;
+    background: transparent;
+    border: none;
+    border-bottom: 1.5px solid var(--ink);
+    outline: none;
+    resize: vertical;
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.15rem;
+    line-height: 2rem; /* align to ruled lines */
+    color: var(--ink);
+    padding: 0.25rem 0;
+    caret-color: var(--accent);
+  }
+  textarea::placeholder { color: var(--rule); }
+
+  .char-count {
+    font-size: 0.65rem;
+    color: var(--muted);
+    text-align: right;
+    margin-top: 0.3rem;
+    margin-bottom: 1.75rem;
+  }
+
+  /* --- voice grid --- */
+  .voices-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 1.5rem;
+  }
+
+  .voice-card {
+    border: 1px solid var(--rule);
+    background: var(--cream);
+    padding: 0.6rem 0.75rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    position: relative;
+  }
+  .voice-card:hover { border-color: var(--ink); }
+  .voice-card.active {
+    border-color: var(--accent);
+    background: #e8f0eb;
+  }
+  .voice-card .vname {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .voice-card .vmeta {
+    font-size: 0.65rem;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .voice-card.active .vname { color: var(--accent); }
+
+  /* --- sliders --- */
+  .sliders {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    margin-bottom: 1.25rem;
+  }
+
+  /* --- controls row --- */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .speed-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex: 1;
+    min-width: 180px;
+  }
+  .speed-wrap label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  input[type=range] {
+    flex: 1;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .speed-val {
+    font-size: 0.8rem;
+    min-width: 28px;
+    color: var(--ink);
+    text-align: right;
+  }
+
+  /* --- generate button --- */
+  .btn-generate {
+    background: var(--ink);
+    color: var(--paper);
+    border: none;
+    padding: 0.7rem 2rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+    flex-shrink: 0;
+  }
+  .btn-generate:hover  { background: var(--accent); }
+  .btn-generate:active { transform: scale(0.97); }
+  .btn-generate:disabled { background: var(--rule); cursor: not-allowed; transform: none; }
+
+  /* --- audio player --- */
+  .player-wrap {
+    margin-top: 2rem;
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    display: none;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .player-wrap.visible { display: flex; }
+
+  .player-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .player-title {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--muted);
+  }
+  .player-voice-tag {
+    font-size: 0.65rem;
+    color: var(--accent);
+  }
+
+  audio {
+    width: 100%;
+    height: 36px;
+  }
+
+  .btn-download {
+    align-self: flex-start;
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--muted);
+    padding: 0.45rem 1rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .btn-download:hover { border-color: var(--ink); color: var(--ink); }
+
+  /* --- history --- */
+  .history-section {
+    margin-top: 2.5rem;
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+  }
+  .history-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--muted);
+    margin-bottom: 0.75rem;
+  }
+  .history-list { display: flex; flex-direction: column; gap: 6px; }
+
+  .history-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0.5rem 0.75rem;
+    background: var(--cream);
+    border: 1px solid var(--rule);
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .history-item:hover { border-color: var(--ink); }
+  .history-item .hi-text {
+    flex: 1;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--ink);
+  }
+  .history-item .hi-voice {
+    font-size: 0.65rem;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .history-item .hi-play {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
+  /* --- spinner overlay --- */
+  .spinner-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(245,240,232,0.8);
+    z-index: 100;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    font-size: 0.8rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .spinner-overlay.active { display: flex; }
+  .progress-track {
+    width: 220px;
+    height: 4px;
+    background: var(--rule);
+    margin-top: 0.4rem;
+    overflow: hidden;
+  }
+  .progress-bar {
+    width: 0%;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+  .btn-cancel {
+    margin-top: 1.25rem;
+    background: transparent;
+    border: 1px solid var(--warn);
+    color: var(--warn);
+    padding: 0.45rem 1.4rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .btn-cancel:hover { background: var(--warn); color: #fff; }
+  .btn-cancel:disabled { opacity: 0.5; cursor: default; background: transparent; color: var(--warn); }
+  .spinner {
+    width: 36px;
+    height: 36px;
+    border: 2px solid var(--rule);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* --- error toast --- */
+  .toast {
+    position: fixed;
+    bottom: 2rem;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: var(--warn);
+    color: #fff;
+    padding: 0.75rem 1.5rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
+    max-width: 90vw;
+    text-align: center;
+    transition: transform 0.3s;
+    z-index: 200;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); }
+
+  .kokoro-hint {
+    margin-top: 2.5rem;
+    padding: 1rem 1.25rem;
+    background: var(--cream);
+    border-left: 3px solid var(--accent2);
+    font-size: 0.72rem;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .kokoro-hint code {
+    display: block;
+    margin-top: 0.4rem;
+    color: var(--ink);
+    background: rgba(0,0,0,0.06);
+    padding: 0.3rem 0.5rem;
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Sprache</h1>
+      <p class="sub">Deutsch · Text to Speech</p>
+    </div>
+    <div class="status-dot" id="statusDot" title="Kokoro engine status"></div>
+  </header>
+
+  <label class="field-label" for="textInput">Text eingeben</label>
+  <textarea
+    id="textInput"
+    placeholder="Schreib hier deinen deutschen Text…"
+    spellcheck="true"
+    lang="de"
+  ></textarea>
+  <div class="char-count"><span id="charCount">0</span> Zeichen</div>
+
+  <label class="field-label">Stimme wählen</label>
+  <div class="voices-grid" id="voicesGrid"></div>
+
+  <div class="sliders">
+    <div class="speed-wrap">
+      <label for="exagRange" title="Höher = ausdrucksstärker / dramatischer">Ausdruck</label>
+      <input type="range" id="exagRange" min="0.25" max="1.6" step="0.05" value="0.5">
+      <span class="speed-val" id="exagVal">0.50</span>
+    </div>
+    <div class="speed-wrap">
+      <label for="cfgRange" title="Niedriger = langsamer & ausdrucksstärker, höher = stabiler">Stabilität</label>
+      <input type="range" id="cfgRange" min="0.2" max="0.8" step="0.05" value="0.5">
+      <span class="speed-val" id="cfgVal">0.50</span>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="btn-generate" id="generateBtn" onclick="generate()">Generieren</button>
+  </div>
+
+  <div class="player-wrap" id="playerWrap">
+    <div class="player-header">
+      <span class="player-title">Ausgabe</span>
+      <span class="player-voice-tag" id="playerVoiceTag"></span>
+    </div>
+    <audio id="audioPlayer" controls></audio>
+    <button class="btn-download" id="downloadBtn">↓ Herunterladen</button>
+  </div>
+
+  <div class="history-section" id="historySection" style="display:none">
+    <p class="history-label">Verlauf</p>
+    <div class="history-list" id="historyList"></div>
+  </div>
+
+  <div class="kokoro-hint" id="kokoroHint" style="display:none">
+    <strong>Server nicht erreichbar.</strong> Starte ihn zuerst:<br>
+    <code>source .venv/bin/activate &amp;&amp; python server.py</code>
+    Dann lade diese Seite neu.
+  </div>
+
+</div>
+
+<div class="spinner-overlay" id="spinnerOverlay">
+  <div class="spinner" id="spinner"></div>
+  <span id="progressLabel">Synthese läuft…</span>
+  <div class="progress-track" id="progressTrack" style="display:none"><div class="progress-bar" id="progressBar"></div></div>
+  <button class="btn-cancel" id="cancelBtn" onclick="cancelGeneration()">Abbrechen</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';  // same origin
+let selectedVoice = null;
+let voices = [];
+let history = [];
+let currentBlob = null;
+let activeJobId = null;
+let cancelRequested = false;
+
+async function init() {
+  await loadVoices();
+  checkStatus();
+  document.getElementById('textInput').addEventListener('input', e => {
+    document.getElementById('charCount').textContent = e.target.value.length;
+  });
+  document.getElementById('exagRange').addEventListener('input', e => {
+    document.getElementById('exagVal').textContent = parseFloat(e.target.value).toFixed(2);
+  });
+  document.getElementById('cfgRange').addEventListener('input', e => {
+    document.getElementById('cfgVal').textContent = parseFloat(e.target.value).toFixed(2);
+  });
+  resumeJob();  // reattach to an in-flight generation if the page was refreshed
+}
+
+async function loadVoices() {
+  try {
+    const r = await fetch(API + '/api/voices');
+    voices = await r.json();
+    renderVoices();
+  } catch(e) {
+    voices = [
+      {id:'df_eva',name:'Eva',gender:'Female',style:'Warm'},
+      {id:'df_heinz',name:'Heinz',gender:'Male',style:'Clear'},
+    ];
+    renderVoices();
+  }
+}
+
+function renderVoices() {
+  const grid = document.getElementById('voicesGrid');
+  grid.innerHTML = '';
+  voices.forEach((v, i) => {
+    const card = document.createElement('div');
+    card.className = 'voice-card' + (i === 0 ? ' active' : '');
+    card.dataset.id = v.id;
+    card.innerHTML = `<div class="vname">${v.name}</div><div class="vmeta">${v.gender} · ${v.style}</div>`;
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.voice-card').forEach(c => c.classList.remove('active'));
+      card.classList.add('active');
+      selectedVoice = v.id;
+    });
+    grid.appendChild(card);
+    if (i === 0) selectedVoice = v.id;
+  });
+}
+
+async function checkStatus() {
+  const dot = document.getElementById('statusDot');
+  const hint = document.getElementById('kokoroHint');
+  try {
+    const r = await fetch(API + '/api/status');
+    const d = await r.json();
+    if (d.ok) {
+      dot.className = 'status-dot ok';
+      dot.title = 'Modell bereit · ' + (d.device || '');
+      hint.style.display = 'none';
+    } else if (d.loading) {
+      // Server is up but the model is still warming — poll until ready.
+      dot.className = 'status-dot';
+      dot.title = 'Modell lädt…';
+      hint.style.display = 'none';
+      setTimeout(checkStatus, 2000);
+    } else {
+      dot.className = 'status-dot err';
+      dot.title = 'Modell nicht geladen';
+      hint.style.display = 'block';
+    }
+  } catch {
+    dot.className = 'status-dot err';
+    dot.title = 'Server nicht erreichbar';
+    hint.style.display = 'block';
+  }
+}
+
+const JOB_KEY = 'ttsActiveJob';
+function saveActiveJob(job) {
+  try { localStorage.setItem(JOB_KEY, JSON.stringify(job)); } catch {}
+}
+function clearActiveJob() {
+  try { localStorage.removeItem(JOB_KEY); } catch {}
+}
+
+// Poll a job's progress until it finishes, then fetch and return its audio blob.
+function awaitJob(job_id) {
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      if (cancelRequested) return reject({ cancelled: true });
+      try {
+        const res = await fetch(API + '/api/progress/' + job_id);
+        if (res.status === 404) return reject(new Error('Auftrag nicht mehr vorhanden.'));
+        const p = await res.json();
+        if (p.status === 'cancelled') return reject({ cancelled: true });
+        if (p.status === 'done') {
+          setProgress(p.total, p.total);
+          const r = await fetch(API + '/api/audio/' + job_id);
+          if (!r.ok) return reject(new Error('Audio konnte nicht geladen werden.'));
+          resolve(await r.blob());
+        } else if (p.status === 'error') {
+          reject(new Error(p.error || 'Synthese fehlgeschlagen.'));
+        } else {
+          setProgress(p.done, p.total);
+          setTimeout(tick, 800);
+        }
+      } catch (e) { reject(e); }
+    };
+    tick();
+  });
+}
+
+// Hard-cancel the active job: tell the server to kill its worker, stop polling.
+async function cancelGeneration() {
+  if (!activeJobId) return;
+  cancelRequested = true;
+  const cancelBtn = document.getElementById('cancelBtn');
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = 'Wird abgebrochen…';
+  try { await fetch(API + '/api/cancel/' + activeJobId, { method: 'POST' }); } catch {}
+}
+
+// Wire a finished audio blob into the player, download button and history.
+function deliverAudio(blob, text, voiceName) {
+  currentBlob = blob;
+  const url = URL.createObjectURL(blob);
+
+  const player = document.getElementById('audioPlayer');
+  player.src = url;
+  player.play();
+
+  document.getElementById('playerVoiceTag').textContent = voiceName;
+  document.getElementById('playerWrap').classList.add('visible');
+
+  const dlBtn = document.getElementById('downloadBtn');
+  dlBtn.onclick = () => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `tts_${Date.now()}.wav`;
+    a.click();
+  };
+
+  addHistory(text, voiceName, url);
+
+  document.getElementById('statusDot').className = 'status-dot ok';
+  document.getElementById('kokoroHint').style.display = 'none';
+}
+
+// Attach to an in-flight or finished job: show progress, then deliver audio.
+async function trackJob(job_id, text, voiceName, total) {
+  const btn = document.getElementById('generateBtn');
+  const overlay = document.getElementById('spinnerOverlay');
+  const cancelBtn = document.getElementById('cancelBtn');
+  activeJobId = job_id;
+  cancelRequested = false;
+  btn.disabled = true;
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = 'Abbrechen';
+  overlay.classList.add('active');
+  setProgress(0, total || 0);
+  try {
+    const blob = await awaitJob(job_id);
+    deliverAudio(blob, text, voiceName);
+  } catch(e) {
+    if (e && e.cancelled) showToast('Synthese abgebrochen.');
+    else showToast(e.message || 'Verbindungsfehler. Läuft der Server?');
+  } finally {
+    clearActiveJob();
+    activeJobId = null;
+    cancelRequested = false;
+    btn.disabled = false;
+    overlay.classList.remove('active');
+  }
+}
+
+// On page load: if a job was in flight before a refresh, reattach to it.
+async function resumeJob() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch { saved = null; }
+  if (!saved || !saved.job_id) return;
+  try {
+    const res = await fetch(API + '/api/progress/' + saved.job_id);
+    if (res.status === 404) { clearActiveJob(); return; }  // gone (e.g. server restart)
+    const p = await res.json();
+    if (p.status === 'error') { clearActiveJob(); return; }
+    // running or done — reattach and resume the progress bar.
+    trackJob(saved.job_id, saved.text, saved.voiceName, p.total);
+  } catch {
+    // Server unreachable; keep the saved job so a later reload can retry.
+  }
+}
+
+async function generate() {
+  const text = document.getElementById('textInput').value.trim();
+  if (!text) { showToast('Bitte Text eingeben.'); return; }
+
+  const exaggeration = parseFloat(document.getElementById('exagRange').value);
+  const cfg_weight = parseFloat(document.getElementById('cfgRange').value);
+  const voiceName = voices.find(v => v.id === selectedVoice)?.name || selectedVoice;
+  const overlay = document.getElementById('spinnerOverlay');
+
+  document.getElementById('generateBtn').disabled = true;
+  overlay.classList.add('active');
+  setProgress(0, 0);
+
+  let job_id, total;
+  try {
+    // Kick off the job — returns immediately with an id and the chunk count.
+    const start = await fetch(API + '/api/synthesize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text, voice: selectedVoice, exaggeration, cfg_weight })
+    });
+    if (!start.ok) {
+      const err = await start.json();
+      showToast(err.error || 'Fehler bei der Synthese.');
+      document.getElementById('generateBtn').disabled = false;
+      overlay.classList.remove('active');
+      return;
+    }
+    ({ job_id, total } = await start.json());
+  } catch(e) {
+    showToast('Verbindungsfehler. Läuft der Server?');
+    document.getElementById('generateBtn').disabled = false;
+    overlay.classList.remove('active');
+    return;
+  }
+
+  // Persist so a refresh can reconnect, then track to completion.
+  saveActiveJob({ job_id, text, voiceName });
+  trackJob(job_id, text, voiceName, total);
+}
+
+function setProgress(done, total) {
+  const label = document.getElementById('progressLabel');
+  const bar = document.getElementById('progressBar');
+  const spinner = document.getElementById('spinner');
+  const track = document.getElementById('progressTrack');
+  // Show the determinate bar only when there's real per-chunk progress to show
+  // (multi-chunk). Otherwise fall back to the indeterminate spinner.
+  if (total > 1) {
+    spinner.style.display = 'none';
+    track.style.display = 'block';
+    label.textContent = `Teil ${done} / ${total}`;
+    bar.style.width = Math.round((done / total) * 100) + '%';
+  } else {
+    spinner.style.display = 'block';
+    track.style.display = 'none';
+    label.textContent = 'Synthese läuft…';
+    bar.style.width = '0%';
+  }
+}
+
+function addHistory(text, voice, url) {
+  history.unshift({ text, voice, url });
+  // Free blob URLs as they fall out of history so they don't leak.
+  while (history.length > 8) {
+    const evicted = history.pop();
+    if (evicted && evicted.url) URL.revokeObjectURL(evicted.url);
+  }
+  renderHistory();
+}
+
+function renderHistory() {
+  const section = document.getElementById('historySection');
+  const list = document.getElementById('historyList');
+  if (history.length === 0) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  list.innerHTML = '';
+  history.forEach(item => {
+    const el = document.createElement('div');
+    el.className = 'history-item';
+    el.innerHTML = `
+      <svg class="hi-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      <span class="hi-text">${escHtml(item.text)}</span>
+      <span class="hi-voice">${escHtml(item.voice)}</span>
+    `;
+    el.querySelector('.hi-play').addEventListener('click', e => {
+      e.stopPropagation();
+      const player = document.getElementById('audioPlayer');
+      player.src = item.url;
+      player.play();
+      document.getElementById('playerWrap').classList.add('visible');
+    });
+    el.addEventListener('click', () => {
+      document.getElementById('textInput').value = item.text;
+      document.getElementById('charCount').textContent = item.text.length;
+    });
+    list.appendChild(el);
+  });
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+init();
+</script>
+</body>
+</html>

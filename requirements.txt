@@ -1,0 +1,6 @@
+chatterbox-tts
+flask
+flask-cors
+soundfile
+# Chatterbox's watermarker (perth) imports pkg_resources, removed in setuptools 81+
+setuptools<81
