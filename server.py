@@ -36,6 +36,12 @@ CHUNK_TIMEOUT = int(os.environ.get("TTS_CHUNK_TIMEOUT", "420"))
 # MPS peaks ~24GB generating this model; below this much total RAM it swaps and
 # crawls, so we auto-pick CPU instead (set TTS_DEVICE to override either way).
 MPS_MIN_RAM_GB = int(os.environ.get("TTS_MPS_MIN_RAM_GB", "32"))
+# Silence inserted between stitched chunks: a short beat between sentences, a longer
+# pause at paragraph boundaries (so titles/paragraphs don't run together).
+SENT_GAP = float(os.environ.get("TTS_SENT_GAP", "0.18"))
+PARA_GAP = float(os.environ.get("TTS_PARA_GAP", "0.5"))
+# Every generation is also saved here as <timestamp>_<voice>.wav (gitignored).
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 # Curated German preset library. `file` is a reference clip in ./voices that
 # Chatterbox clones. Add a voice by dropping a clean ~10-15s mono WAV in ./voices
@@ -112,36 +118,36 @@ def _worker_main(request_q, response_q, language, forced_device):
             break
         jid = job["job_id"]
         try:
-            pieces = []
-            for i, chunk in enumerate(job["chunks"]):
-                # Budget tokens to roughly what this chunk needs (+headroom), so a
-                # runaway is cut off early instead of sampling to 1000.
-                _cap["v"] = min(1000, int(len(chunk) * 1.5) + 120)
+            import librosa
+            stitched = []
+            chunks = job["chunks"]
+            for i, (text, gap) in enumerate(chunks):
+                # Budget tokens to what this chunk needs with comfortable headroom,
+                # so a runaway is cut off but a dense chunk isn't truncated mid-word
+                # (truncation leaves the trailing "ethereal" artifact).
+                _cap["v"] = min(1000, int(len(text) * 2.2) + 160)
                 with torch.inference_mode():  # no autograd graph -> far less memory
                     wav = model.generate(
-                        chunk,
+                        text,
                         language_id=language,
                         audio_prompt_path=job["ref_path"],
                         exaggeration=job["exaggeration"],
                         cfg_weight=job["cfg_weight"],
                     )
-                pieces.append(wav.squeeze(0).detach().to("cpu").numpy())
+                audio = wav.squeeze(0).detach().to("cpu").numpy()
                 del wav
                 free()
+                # Trim leading/trailing near-silence (and any trailing artifact the
+                # model appends), so chunk boundaries are clean and consistent.
+                trimmed, _ = librosa.effects.trim(audio, top_db=30)
+                if trimmed.size:
+                    audio = trimmed
+                stitched.append(audio)
+                if i < len(chunks) - 1 and gap > 0:
+                    stitched.append(np.zeros(int(model.sr * gap), dtype=audio.dtype))
                 response_q.put({"type": "progress", "job_id": jid, "done": i + 1})
 
-            # Stitch chunks with a short silence so sentences don't run together.
-            if len(pieces) > 1:
-                gap = np.zeros(int(model.sr * 0.2), dtype=pieces[0].dtype)
-                stitched = []
-                for i, p in enumerate(pieces):
-                    stitched.append(p)
-                    if i < len(pieces) - 1:
-                        stitched.append(gap)
-                audio = np.concatenate(stitched)
-            else:
-                audio = pieces[0]
-
+            audio = np.concatenate(stitched) if len(stitched) > 1 else stitched[0]
             buf = io.BytesIO()
             sf.write(buf, audio, model.sr, format="WAV")
             response_q.put({"type": "done", "job_id": jid, "audio": buf.getvalue()})
@@ -180,6 +186,18 @@ def _hold_awake():
         _awake = None  # non-macOS or caffeinate missing — best effort
 
 
+def _save_output(audio_bytes, voice):
+    """Persist a finished generation to OUTPUT_DIR as <timestamp>_<voice>.wav."""
+    try:
+        import datetime
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        with open(os.path.join(OUTPUT_DIR, f"{ts}_{voice}.wav"), "wb") as f:
+            f.write(audio_bytes)
+    except Exception:
+        pass  # saving is best-effort; never fail the request over it
+
+
 def _release_awake_if_idle():
     """Drop the wake-lock once no job is running."""
     global _awake
@@ -216,6 +234,8 @@ def _reader_loop(response_q, gen_id):
             elif t == "done":
                 job["audio"] = msg["audio"]
                 job["status"] = "done"
+                threading.Thread(target=_save_output, args=(msg["audio"], job["voice"]),
+                                 daemon=True).start()
                 threading.Thread(target=_release_awake_if_idle, daemon=True).start()
             elif t == "error":
                 job["error"] = msg["error"]
@@ -284,60 +304,57 @@ def _watchdog_loop():
 
 
 def _split_text(text, max_chars):
-    """Split text into chunks on sentence/line boundaries, avoiding tiny fragments.
+    """Split text into (chunk_text, gap_after_seconds), preserving paragraph structure.
 
-    Generation memory grows with input length, so long inputs must be chunked to
-    stay within the device memory budget. But the model tends to *ramble* (sampling
-    toward its token cap) when handed a short fragment like a title or a one-line
-    paragraph — so we merge sub-`min_chars` pieces into a neighbour, allowing a
-    chunk to grow up to `hard_max` to absorb them. Sentences longer than a whole
-    chunk are hard-split on word boundaries.
+    Paragraphs (blank-line separated, e.g. a title or a one-line of dialogue) become
+    their own chunk(s) with a longer pause after, so the narrator doesn't run a title
+    straight into the first sentence. Within a paragraph, sentences are packed up to
+    max_chars and separated by a short pause. Overlong sentences are hard-split on
+    word boundaries. The per-chunk token cap (see worker) prevents short chunks from
+    rambling, so we no longer merge fragments across paragraphs.
     """
     import re
-    hard_max = int(max_chars * 1.3)          # ceiling when absorbing a short fragment
-    min_chars = max(40, max_chars // 6)      # anything shorter is a "tiny" fragment
-    parts = re.split(r"(?<=[.!?…])\s+|\n+", text.strip())
-
-    # 1) Break parts that are longer than a whole chunk into word-bounded atoms.
-    atoms = []
-    for p in (s.strip() for s in parts):
-        if not p:
-            continue
-        if len(p) <= max_chars:
-            atoms.append(p)
-            continue
-        buf = ""
-        for w in p.split():
-            if buf and len(buf) + len(w) + 1 > max_chars:
-                atoms.append(buf)
-                buf = ""
-            buf = f"{buf} {w}".strip()
-        if buf:
-            atoms.append(buf)
-
-    # 2) Greedily pack atoms; absorb extra into a still-too-short chunk.
-    chunks, cur = [], ""
-    for a in atoms:
-        if not cur:
-            cur = a
-        elif (len(cur) + len(a) + 1 <= max_chars
-              or (len(cur) < min_chars and len(cur) + len(a) + 1 <= hard_max)):
-            cur = f"{cur} {a}"
-        else:
-            chunks.append(cur)
-            cur = a
-    if cur:
-        chunks.append(cur)
-
-    # 3) Fold any leftover tiny chunk into an adjacent one (e.g. a trailing line).
     out = []
-    for c in chunks:
-        if out and (len(c) < min_chars or len(out[-1]) < min_chars) \
-                and len(out[-1]) + len(c) + 1 <= hard_max:
-            out[-1] = f"{out[-1]} {c}"
-        else:
-            out.append(c)
-    return out or [text.strip()]
+    for para in re.split(r"\n\s*\n+", text.strip()):
+        para = " ".join(para.split())          # collapse internal newlines/spaces
+        if not para:
+            continue
+        # Sentences within the paragraph, hard-splitting any overlong one.
+        atoms = []
+        for s in (x.strip() for x in re.split(r"(?<=[.!?…])\s+", para)):
+            if not s:
+                continue
+            if len(s) <= max_chars:
+                atoms.append(s)
+                continue
+            buf = ""
+            for w in s.split():
+                if buf and len(buf) + len(w) + 1 > max_chars:
+                    atoms.append(buf)
+                    buf = ""
+                buf = f"{buf} {w}".strip()
+            if buf:
+                atoms.append(buf)
+        # Pack sentences into <=max_chars chunks.
+        para_chunks, cur = [], ""
+        for a in atoms:
+            if not cur:
+                cur = a
+            elif len(cur) + len(a) + 1 <= max_chars:
+                cur = f"{cur} {a}"
+            else:
+                para_chunks.append(cur)
+                cur = a
+        if cur:
+            para_chunks.append(cur)
+        # Short gap between sentence-chunks; longer gap after the last (paragraph end).
+        for j, c in enumerate(para_chunks):
+            out.append([c, PARA_GAP if j == len(para_chunks) - 1 else SENT_GAP])
+
+    if not out:
+        out = [[text.strip(), 0.0]]
+    out[-1][1] = 0.0  # no trailing gap on the very last chunk
+    return out
 
 
 def _voice_by_id(voice_id):

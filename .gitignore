@@ -17,6 +17,7 @@ venv/
 # Generated / downloaded audio (reference clips in voices/ are kept on purpose)
 /*.wav
 tts_*.wav
+output/
 
 # Local env overrides
 .env
