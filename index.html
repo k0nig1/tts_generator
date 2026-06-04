@@ -7,6 +7,16 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<script>
+  // Set the theme before first paint to avoid a flash of the wrong theme.
+  (function () {
+    try {
+      var t = localStorage.getItem('ttsTheme') ||
+        (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {}
+  })();
+</script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -19,6 +29,23 @@
     --accent2: #8b3a1e;
     --muted:   #7a7065;
     --warn:    #c0392b;
+    --active-bg:  #e8f0eb;
+    --overlay-bg: rgba(245,240,232,0.8);
+    --code-bg:    rgba(0,0,0,0.06);
+  }
+
+  :root[data-theme="dark"] {
+    --ink:     #ece4d6;
+    --paper:   #16130f;
+    --cream:   #211c16;
+    --rule:    #3a332a;
+    --accent:  #7bbd92;
+    --accent2: #d08a5c;
+    --muted:   #968b7c;
+    --warn:    #e0664f;
+    --active-bg:  #1f2e25;
+    --overlay-bg: rgba(16,19,15,0.85);
+    --code-bg:    rgba(255,255,255,0.07);
   }
 
   body {
@@ -30,6 +57,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
+    transition: background 0.3s, color 0.3s;
   }
 
   /* Subtle ruled paper lines */
@@ -80,13 +108,31 @@
     margin-top: 4px;
   }
 
+  .header-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .theme-toggle {
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--muted);
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .theme-toggle:hover { border-color: var(--ink); color: var(--ink); }
+
   .status-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
     background: var(--rule);
-    margin-left: auto;
-    margin-bottom: 4px;
     flex-shrink: 0;
     transition: background 0.4s;
   }
@@ -147,7 +193,7 @@
   .voice-card:hover { border-color: var(--ink); }
   .voice-card.active {
     border-color: var(--accent);
-    background: #e8f0eb;
+    background: var(--active-bg);
   }
   .voice-card .vname {
     font-size: 0.85rem;
@@ -320,7 +366,7 @@
   .spinner-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(245,240,232,0.8);
+    background: var(--overlay-bg);
     z-index: 100;
     display: none;
     flex-direction: column;
@@ -402,7 +448,7 @@
     display: block;
     margin-top: 0.4rem;
     color: var(--ink);
-    background: rgba(0,0,0,0.06);
+    background: var(--code-bg);
     padding: 0.3rem 0.5rem;
   }
 </style>
@@ -416,7 +462,11 @@
       <h1>Sprache</h1>
       <p class="sub">Deutsch · Text to Speech</p>
     </div>
-    <div class="status-dot" id="statusDot" title="Kokoro engine status"></div>
+    <div class="header-actions">
+      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()"
+              title="Hell / Dunkel umschalten" aria-label="Theme umschalten">☾</button>
+      <div class="status-dot" id="statusDot" title="Engine status"></div>
+    </div>
   </header>
 
   <label class="field-label" for="textInput">Text eingeben</label>
@@ -488,7 +538,21 @@ let currentBlob = null;
 let activeJobId = null;
 let cancelRequested = false;
 
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  document.getElementById('themeToggle').textContent = theme === 'dark' ? '☀' : '☾';
+  try { localStorage.setItem('ttsTheme', theme); } catch {}
+}
+function toggleTheme() {
+  applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+}
+
 async function init() {
+  // Sync the toggle icon with the theme set by the early head script.
+  document.getElementById('themeToggle').textContent = currentTheme() === 'dark' ? '☀' : '☾';
   await loadVoices();
   checkStatus();
   document.getElementById('textInput').addEventListener('input', e => {
