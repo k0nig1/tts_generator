@@ -164,6 +164,31 @@ _device = None
 _jobs = {}
 _jobs_lock = threading.Lock()
 
+# Hold a wake-lock while a job runs so the Mac doesn't idle-sleep mid-generation
+# (sleep suspends the worker — a long job would otherwise drag across hours).
+_awake = None
+
+
+def _hold_awake():
+    global _awake
+    if _awake is not None and _awake.poll() is None:
+        return
+    try:
+        import subprocess
+        _awake = subprocess.Popen(["caffeinate", "-i"])  # prevent idle system sleep
+    except Exception:
+        _awake = None  # non-macOS or caffeinate missing — best effort
+
+
+def _release_awake_if_idle():
+    """Drop the wake-lock once no job is running."""
+    global _awake
+    with _jobs_lock:
+        busy = any(j["status"] == "running" for j in _jobs.values())
+    if not busy and _awake is not None and _awake.poll() is None:
+        _awake.terminate()
+        _awake = None
+
 
 def _reader_loop(response_q, gen_id):
     """Drain one worker's response queue into job state until that worker is replaced."""
@@ -191,9 +216,11 @@ def _reader_loop(response_q, gen_id):
             elif t == "done":
                 job["audio"] = msg["audio"]
                 job["status"] = "done"
+                threading.Thread(target=_release_awake_if_idle, daemon=True).start()
             elif t == "error":
                 job["error"] = msg["error"]
                 job["status"] = "error"
+                threading.Thread(target=_release_awake_if_idle, daemon=True).start()
 
 
 def _spawn_worker():
@@ -360,6 +387,7 @@ def synthesize():
                              "audio": None, "error": None, "voice": voice_id,
                              "last_progress": time.monotonic()}
         _ensure_worker()
+        _hold_awake()  # keep the Mac awake for the duration of this job
         _request_q.put({
             "job_id": job_id, "chunks": chunks, "ref_path": ref_path,
             "exaggeration": exaggeration, "cfg_weight": cfg_weight,
@@ -385,6 +413,7 @@ def cancel(job_id):
             if job and job["status"] == "running":
                 job["status"] = "cancelled"
         _restart_worker()  # terminating the process stops any in-flight generation
+    _release_awake_if_idle()
     return jsonify({"ok": True})
 
 
@@ -412,7 +441,12 @@ def status():
 if __name__ == "__main__":
     import atexit
     print("\n🎙  German TTS (Chatterbox Multilingual) at http://localhost:5050")
-    atexit.register(lambda: _kill_proc(_proc))  # never orphan the worker on exit
+
+    def _shutdown():
+        _kill_proc(_proc)  # never orphan the worker on exit
+        if _awake is not None and _awake.poll() is None:
+            _awake.terminate()
+    atexit.register(_shutdown)
     threading.Thread(target=_watchdog_loop, daemon=True).start()
     if os.environ.get("TTS_PRELOAD", "1") == "1":
         # Warm the worker (and model) at boot so the first request isn't slow.
@@ -421,4 +455,4 @@ if __name__ == "__main__":
     try:
         app.run(port=5050, debug=False, threaded=True)
     finally:
-        _kill_proc(_proc)
+        _shutdown()

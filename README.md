@@ -68,6 +68,14 @@ TTS_DEVICE=mps python server.py            # force MPS (needs lots of RAM)
 TTS_MPS_MIN_RAM_GB=24 python server.py     # lower the MPS RAM threshold
 ```
 
+## Long runs / sleep
+
+Generation is paused if the Mac sleeps (it suspends the worker), so a long job left
+unattended can drag across hours of wall-clock. The server holds a wake-lock
+(`caffeinate -i`) **only while a job is running**, so it won't idle-sleep
+mid-generation and sleeps normally otherwise. Rough timing on CPU: ~4–5× the clip
+length (a 15-chunk story ≈ 25–30 min of actual compute).
+
 ## Stopping
 
 Stop the server with **Ctrl+C** (or close the terminal). The generation runs in a
