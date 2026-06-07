@@ -89,11 +89,16 @@ def _worker_main(request_q, response_q, language, forced_device):
     # The library hardcodes max_new_tokens=1000 in generate(); a chunk that fails to
     # emit end-of-speech then grinds to that cap (slow, stretched audio, watchdog
     # kills). Patch the T3 inference to honour a per-chunk cap sized to the text.
-    _cap = {"v": 1000}
+    _cap = {"v": 1000, "last_tokens": -1}
     _orig_inference = model.t3.inference
     def _capped_inference(*a, **k):
         k["max_new_tokens"] = _cap["v"]
-        return _orig_inference(*a, **k)
+        out = _orig_inference(*a, **k)
+        try:
+            _cap["last_tokens"] = int(out.shape[-1])
+        except Exception:
+            _cap["last_tokens"] = -1
+        return out
     model.t3.inference = _capped_inference
 
     response_q.put({"type": "ready", "device": device})
@@ -117,35 +122,69 @@ def _worker_main(request_q, response_q, language, forced_device):
             break
         jid = job["job_id"]
         try:
+            debug = bool(os.environ.get("TTS_DEBUG"))
+            dbg_dir = os.path.join(OUTPUT_DIR, f"debug_{jid[:8]}") if debug else None
+            if dbg_dir:
+                os.makedirs(dbg_dir, exist_ok=True)
+            manifest, cum = [], 0.0
+
             stitched = []
             chunks = job["chunks"]
             for i, (text, gap) in enumerate(chunks):
-                # Budget tokens to what this chunk needs with comfortable headroom,
-                # so a runaway is cut off but a dense chunk isn't truncated mid-word.
-                _cap["v"] = min(1000, int(len(text) * 2.2) + 160)
-                with torch.inference_mode():  # no autograd graph -> far less memory
-                    wav = model.generate(
-                        text,
-                        language_id=language,
-                        audio_prompt_path=job["ref_path"],
-                        exaggeration=job["exaggeration"],
-                        cfg_weight=job["cfg_weight"],
-                    )
-                audio = wav.squeeze(0).detach().to("cpu").numpy()
-                del wav
-                free()
+                # Cap tokens with headroom over what clean speech needs (~1.5/char),
+                # so a chunk that ends naturally fits but a runaway is bounded.
+                cap = min(1000, int(len(text) * 1.8) + 120)
+                _cap["v"] = cap
+                # Some chunks never emit end-of-speech and ramble (hallucinated
+                # "spooky" audio) up to the cap. A cap-hit is a reliable signal of
+                # that — retry with lower temperature (wanders less) and keep the
+                # cleanest take that stops on its own.
+                best_audio, best_tokens = None, 10 ** 9
+                for temp in (0.8, 0.55, 0.4):
+                    with torch.inference_mode():  # no autograd graph -> less memory
+                        wav = model.generate(
+                            text,
+                            language_id=language,
+                            audio_prompt_path=job["ref_path"],
+                            exaggeration=job["exaggeration"],
+                            cfg_weight=job["cfg_weight"],
+                            temperature=temp,
+                        )
+                    a = wav.squeeze(0).detach().to("cpu").numpy()
+                    del wav
+                    free()
+                    if _cap["last_tokens"] < best_tokens:
+                        best_audio, best_tokens = a, _cap["last_tokens"]
+                    if _cap["last_tokens"] < cap:   # ended naturally -> good take
+                        break
+                audio = best_audio
                 # Declick the boundary with a tiny edge-fade — smooths the seam click
-                # WITHOUT trimming speech or the model's natural pauses (trimming made
-                # the audio choppy at seams and sped up the pacing).
+                # WITHOUT trimming speech or the model's natural pauses.
                 n = min(int(model.sr * 0.015), audio.shape[0] // 2)
                 if n > 0:
                     ramp = np.linspace(0.0, 1.0, n, dtype=audio.dtype)
                     audio[:n] *= ramp
                     audio[-n:] *= ramp[::-1]
+
+                if dbg_dir:
+                    dur = len(audio) / model.sr
+                    tok, cap = _cap["last_tokens"], _cap["v"]
+                    sf.write(os.path.join(dbg_dir, f"chunk_{i:02d}.wav"), audio, model.sr, format="WAV")
+                    manifest.append(
+                        f"{i:02d}  start={cum:6.1f}s  dur={dur:5.1f}s  chars={len(text):4d}  "
+                        f"tokens={tok:4d}/{cap:<4d}{'  <-- CAP HIT' if tok >= cap else ''}\n"
+                        f"      {text[:90]}"
+                    )
+                    cum += dur + (gap if (i < len(chunks) - 1 and gap > 0) else 0)
+
                 stitched.append(audio)
                 if i < len(chunks) - 1 and gap > 0:
                     stitched.append(np.zeros(int(model.sr * gap), dtype=audio.dtype))
                 response_q.put({"type": "progress", "job_id": jid, "done": i + 1})
+
+            if dbg_dir:
+                with open(os.path.join(dbg_dir, "manifest.txt"), "w") as f:
+                    f.write("\n".join(manifest) + "\n")
 
             audio = np.concatenate(stitched) if len(stitched) > 1 else stitched[0]
             buf = io.BytesIO()
