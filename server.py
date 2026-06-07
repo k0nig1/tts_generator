@@ -117,13 +117,11 @@ def _worker_main(request_q, response_q, language, forced_device):
             break
         jid = job["job_id"]
         try:
-            import librosa
             stitched = []
             chunks = job["chunks"]
             for i, (text, gap) in enumerate(chunks):
                 # Budget tokens to what this chunk needs with comfortable headroom,
-                # so a runaway is cut off but a dense chunk isn't truncated mid-word
-                # (truncation leaves the trailing "ethereal" artifact).
+                # so a runaway is cut off but a dense chunk isn't truncated mid-word.
                 _cap["v"] = min(1000, int(len(text) * 2.2) + 160)
                 with torch.inference_mode():  # no autograd graph -> far less memory
                     wav = model.generate(
@@ -136,11 +134,14 @@ def _worker_main(request_q, response_q, language, forced_device):
                 audio = wav.squeeze(0).detach().to("cpu").numpy()
                 del wav
                 free()
-                # Trim leading/trailing near-silence (and any trailing artifact the
-                # model appends), so chunk boundaries are clean and consistent.
-                trimmed, _ = librosa.effects.trim(audio, top_db=30)
-                if trimmed.size:
-                    audio = trimmed
+                # Declick the boundary with a tiny edge-fade — smooths the seam click
+                # WITHOUT trimming speech or the model's natural pauses (trimming made
+                # the audio choppy at seams and sped up the pacing).
+                n = min(int(model.sr * 0.015), audio.shape[0] // 2)
+                if n > 0:
+                    ramp = np.linspace(0.0, 1.0, n, dtype=audio.dtype)
+                    audio[:n] *= ramp
+                    audio[-n:] *= ramp[::-1]
                 stitched.append(audio)
                 if i < len(chunks) - 1 and gap > 0:
                     stitched.append(np.zeros(int(model.sr * gap), dtype=audio.dtype))
