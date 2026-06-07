@@ -167,16 +167,15 @@ def _worker_main(request_q, response_q, language, forced_device):
             stitched = []
             chunks = job["chunks"]
             for i, (text, gap) in enumerate(chunks):
-                # Cap tokens with headroom over what clean speech needs (~1.5/char),
-                # so a chunk that ends naturally fits but a runaway is bounded.
-                cap = min(1000, int(len(text) * 1.8) + 120)
-                _cap["v"] = cap
-                # Some chunks never emit end-of-speech and ramble (hallucinated
-                # "spooky" audio) up to the cap. A cap-hit is a reliable signal of
-                # that — retry with lower temperature (wanders less) and keep the
-                # cleanest take that stops on its own.
+                # Clean speech needs ~1.5 tokens/char; chunks that emit substantially
+                # more are padding with non-speech "garbage" tokens (the spooky
+                # drones/hiss, sometimes mid-chunk). Treat over-generation as the
+                # signal: regenerate (lower temperature wanders less) and KEEP THE
+                # FEWEST-TOKEN take — the cleanest one, with no garbage anywhere.
+                clean_budget = int(len(text) * 1.6) + 30
+                _cap["v"] = min(1000, int(len(text) * 1.9) + 120)  # bound each take
                 best_audio, best_tokens = None, 10 ** 9
-                for temp in (0.8, 0.55, 0.4):
+                for temp in (0.8, 0.5, 0.35):
                     with torch.inference_mode():  # no autograd graph -> less memory
                         wav = model.generate(
                             text,
@@ -191,7 +190,7 @@ def _worker_main(request_q, response_q, language, forced_device):
                     free()
                     if _cap["last_tokens"] < best_tokens:
                         best_audio, best_tokens = a, _cap["last_tokens"]
-                    if _cap["last_tokens"] < cap:   # ended naturally -> good take
+                    if _cap["last_tokens"] <= clean_budget:   # no over-generation
                         break
                 audio = best_audio
                 # Remove any trailing "ethereal" artifact the model appended after the
