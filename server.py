@@ -55,6 +55,42 @@ VOICES = [
 # Worker subprocess: loads the model once, generates chunk-by-chunk, reports
 # progress and the finished WAV over a queue. Killed (and respawned) on cancel.
 # =============================================================================
+def _trim_trailing(audio, sr, frame=0.05, sil=0.06, gap=0.4, max_tail=3.0, pad=0.12):
+    """Trim a trailing artifact the model sometimes appends after the speech ends.
+
+    Two cases (both validated on real output): (1) a quiet "ethereal" blob that
+    follows a >=0.4s silence gap — cut at the gap; (2) plain trailing near-silence/
+    hum — trimmed. A clean ending (energy continuing to the end) is left untouched.
+    """
+    import numpy as np
+    n = int(sr * frame)
+    if len(audio) < n * 6:
+        return audio
+    nf = len(audio) // n
+    fr = np.array([np.sqrt(np.mean(audio[k * n:(k + 1) * n] ** 2)) for k in range(nf)])
+    norm = fr / (fr.max() + 1e-9)
+
+    end = nf
+    j, gf = nf - 1, int(gap / frame)
+    while j >= 0:                      # find last quiet tail that follows a silence gap
+        if norm[j] < sil:
+            e = j
+            while j >= 0 and norm[j] < sil:
+                j -= 1
+            s = j + 1
+            after = norm[e + 1:nf]
+            if (e - s + 1) >= gf and 0 < len(after) * frame <= max_tail:
+                before = norm[max(0, s - int(1.0 / frame)):s]
+                if len(after) and len(before) and after.mean() < 0.5 * before.mean():
+                    end = s
+                    break
+        else:
+            j -= 1
+    while end > 0 and norm[end - 1] < sil:   # then drop any trailing near-silence
+        end -= 1
+    return audio[:min(len(audio), end * n + int(pad * sr))]
+
+
 def _worker_main(request_q, response_q, language, forced_device):
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     import numpy as np
@@ -158,8 +194,9 @@ def _worker_main(request_q, response_q, language, forced_device):
                     if _cap["last_tokens"] < cap:   # ended naturally -> good take
                         break
                 audio = best_audio
-                # Declick the boundary with a tiny edge-fade — smooths the seam click
-                # WITHOUT trimming speech or the model's natural pauses.
+                # Remove any trailing "ethereal" artifact the model appended after the
+                # speech, then declick the edges with a tiny fade.
+                audio = _trim_trailing(audio, model.sr)
                 n = min(int(model.sr * 0.015), audio.shape[0] // 2)
                 if n > 0:
                     ramp = np.linspace(0.0, 1.0, n, dtype=audio.dtype)
