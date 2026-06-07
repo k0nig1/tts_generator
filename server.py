@@ -180,23 +180,25 @@ def _setup_xtts(device, language, free):
     gpt_cond, spk = model.get_conditioning_latents(audio_path=refs)
 
     def make_take(text, job):
-        best, best_bad = None, 1e9
-        for temp in (0.65, 0.55, 0.75):
+        # enable_text_splitting lets XTTS segment the chunk into sentences itself,
+        # which greatly reduces word/phrase SKIPPING. Generate a couple of takes and
+        # keep the most COMPLETE (longest) low-drone one — a skipped take is shorter,
+        # so "longest clean" favours the take that dropped nothing.
+        cands = []
+        for temp in (0.7, 0.6):
             out = model.inference(
                 text, language, gpt_cond, spk,
                 temperature=temp, repetition_penalty=4.0, length_penalty=1.0,
-                enable_text_splitting=False,
+                enable_text_splitting=True,
             )
             w = out["wav"]
             a = w.detach().cpu().numpy() if hasattr(w, "detach") else np.asarray(w, dtype=np.float32)
             a = np.asarray(a, dtype=np.float32).reshape(-1)
             free()
-            bad = _drone_seconds(a, sr)
-            if bad < best_bad:
-                best, best_bad = a, bad
-            if bad < 0.5:
-                break
-        return best, f"drone={best_bad:.1f}s"
+            cands.append((a, _drone_seconds(a, sr)))
+        clean = [c for c in cands if c[1] < 0.6] or cands
+        a, bad = max(clean, key=lambda c: len(c[0]))  # longest clean = most complete
+        return a, f"dur={len(a) / sr:.1f}s drone={bad:.1f}s"
 
     return sr, make_take
 
