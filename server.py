@@ -36,9 +36,11 @@ CHUNK_TIMEOUT = int(os.environ.get("TTS_CHUNK_TIMEOUT", "420"))
 # MPS peaks ~24GB generating this model; below this much total RAM it swaps and
 # crawls, so we auto-pick CPU instead (set TTS_DEVICE to override either way).
 MPS_MIN_RAM_GB = int(os.environ.get("TTS_MPS_MIN_RAM_GB", "32"))
-# Silence inserted between stitched chunks (a short beat; within-chunk pauses come
-# from the text's own punctuation).
-SENT_GAP = float(os.environ.get("TTS_SENT_GAP", "0.18"))
+# Clear pauses at sentence/paragraph boundaries. We generate one sentence per chunk
+# so the stitched audio has a detectable gap at EVERY sentence — an acoustic anchor
+# that LingQ's auto-aligner can re-snap to, instead of drifting across packed text.
+SENT_GAP = float(os.environ.get("TTS_SENT_GAP", "0.35"))
+PARA_GAP = float(os.environ.get("TTS_PARA_GAP", "0.6"))
 # Every generation is also saved here as <timestamp>_<voice>.wav (gitignored).
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
@@ -91,59 +93,137 @@ def _trim_trailing(audio, sr, frame=0.05, sil=0.06, gap=0.4, max_tail=3.0, pad=0
     return audio[:min(len(audio), end * n + int(pad * sr))]
 
 
+def _drone_seconds(y, sr):
+    """Crude artifact metric: seconds of sustained low-energy, low-pitch audio."""
+    import numpy as np
+    import librosa
+    if len(y) < sr // 2:
+        return 0.0
+    hop = int(sr * 0.1)
+    rms = librosa.feature.rms(y=y, frame_length=hop * 2, hop_length=hop)[0]
+    cent = librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=2048, hop_length=hop)[0]
+    norm = rms / (rms.max() + 1e-9)
+    return float(np.sum((norm < 0.3) & (cent < 1400)) * 0.1)
+
+
+def _pick_device(forced_device):
+    import torch
+    if forced_device:
+        return forced_device
+    if torch.cuda.is_available():
+        return "cuda"
+    try:
+        import subprocess
+        ram = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"])) / (1024 ** 3)
+    except Exception:
+        ram = 0
+    if torch.backends.mps.is_available() and ram >= MPS_MIN_RAM_GB:
+        return "mps"
+    return "cpu"
+
+
+def _setup_chatterbox(device, language, free):
+    """Load Chatterbox; return (sample_rate, make_take). make_take does the
+    token-cap best-of-N retry and returns the cleanest (fewest-token) take."""
+    import torch
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+    try:
+        model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    except Exception:
+        model = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
+    cap = {"v": 1000, "last": -1}
+    orig = model.t3.inference
+    def capped(*a, **k):
+        k["max_new_tokens"] = cap["v"]
+        out = orig(*a, **k)
+        try:
+            cap["last"] = int(out.shape[-1])
+        except Exception:
+            cap["last"] = -1
+        return out
+    model.t3.inference = capped
+
+    def make_take(text, job):
+        clean_budget = int(len(text) * 1.6) + 30
+        cap["v"] = min(1000, int(len(text) * 1.9) + 120)
+        best, best_tok = None, 10 ** 9
+        for temp in (0.8, 0.5, 0.35):
+            with torch.inference_mode():
+                wav = model.generate(
+                    text, language_id=language, audio_prompt_path=job["ref_path"],
+                    exaggeration=job["exaggeration"], cfg_weight=job["cfg_weight"],
+                    temperature=temp,
+                )
+            a = wav.squeeze(0).detach().to("cpu").numpy()
+            del wav
+            free()
+            if cap["last"] < best_tok:
+                best, best_tok = a, cap["last"]
+            if cap["last"] <= clean_budget:
+                break
+        return best, f"tokens={best_tok}/{cap['v']}"
+
+    return model.sr, make_take
+
+
+def _setup_xtts(device, language, free):
+    """Load XTTS-v2 (coqui-tts); return (sample_rate, make_take). Clones from all
+    helmut*.wav refs (averaged latents) and picks the least-droney of N takes."""
+    import os
+    import numpy as np
+    os.environ.setdefault("COQUI_TOS_AGREED", "1")
+    from TTS.api import TTS
+    xdev = "cuda" if device == "cuda" else "cpu"  # XTTS MPS support is unreliable
+    api = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(xdev)
+    model = api.synthesizer.tts_model
+    sr = int(model.config.audio.output_sample_rate)
+    import glob
+    refs = sorted(glob.glob(os.path.join(VOICES_DIR, "helmut*.wav")))
+    gpt_cond, spk = model.get_conditioning_latents(audio_path=refs)
+
+    def make_take(text, job):
+        # enable_text_splitting lets XTTS segment the chunk into sentences itself,
+        # which greatly reduces word/phrase SKIPPING. Generate a couple of takes and
+        # keep the most COMPLETE (longest) low-drone one — a skipped take is shorter,
+        # so "longest clean" favours the take that dropped nothing.
+        cands = []
+        for temp in (0.7, 0.6):
+            out = model.inference(
+                text, language, gpt_cond, spk,
+                temperature=temp, repetition_penalty=4.0, length_penalty=1.0,
+                enable_text_splitting=True,
+            )
+            w = out["wav"]
+            a = w.detach().cpu().numpy() if hasattr(w, "detach") else np.asarray(w, dtype=np.float32)
+            a = np.asarray(a, dtype=np.float32).reshape(-1)
+            free()
+            cands.append((a, _drone_seconds(a, sr)))
+        clean = [c for c in cands if c[1] < 0.6] or cands
+        a, bad = max(clean, key=lambda c: len(c[0]))  # longest clean = most complete
+        return a, f"dur={len(a) / sr:.1f}s drone={bad:.1f}s"
+
+    return sr, make_take
+
+
 def _worker_main(request_q, response_q, language, forced_device):
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     import numpy as np
     import soundfile as sf
     import torch
-    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-    def total_ram_gb():
-        try:
-            import subprocess
-            return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"])) / (1024 ** 3)
-        except Exception:
-            return 0  # unknown -> treat as low and prefer CPU (safe)
-
-    if forced_device:
-        device = forced_device
-    elif torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available() and total_ram_gb() >= MPS_MIN_RAM_GB:
-        # MPS peaks ~24GB while generating; only worth it with enough unified RAM,
-        # else it swaps and crawls. Below the threshold, CPU is faster and safe.
-        device = "mps"
-    else:
-        device = "cpu"
-
-    try:
-        model = ChatterboxMultilingualTTS.from_pretrained(device=device)
-    except Exception:
-        device = "cpu"
-        model = ChatterboxMultilingualTTS.from_pretrained(device="cpu")
-
-    # The library hardcodes max_new_tokens=1000 in generate(); a chunk that fails to
-    # emit end-of-speech then grinds to that cap (slow, stretched audio, watchdog
-    # kills). Patch the T3 inference to honour a per-chunk cap sized to the text.
-    _cap = {"v": 1000, "last_tokens": -1}
-    _orig_inference = model.t3.inference
-    def _capped_inference(*a, **k):
-        k["max_new_tokens"] = _cap["v"]
-        out = _orig_inference(*a, **k)
-        try:
-            _cap["last_tokens"] = int(out.shape[-1])
-        except Exception:
-            _cap["last_tokens"] = -1
-        return out
-    model.t3.inference = _capped_inference
-
-    response_q.put({"type": "ready", "device": device})
+    device = _pick_device(forced_device)
+    engine = os.environ.get("TTS_ENGINE", "chatterbox").lower()
 
     def free():
         if device == "mps" and hasattr(torch, "mps"):
             torch.mps.empty_cache()
         elif device == "cuda":
             torch.cuda.empty_cache()
+
+    # Engine-pluggable: each returns (sample_rate, make_take(text, job)->(audio, info)).
+    sr, make_take = (_setup_xtts if engine == "xtts" else _setup_chatterbox)(device, language, free)
+    response_q.put({"type": "ready", "device": f"{device}/{engine}"})
 
     while True:
         # Self-terminate if orphaned (parent died) so we never linger holding the
@@ -167,55 +247,28 @@ def _worker_main(request_q, response_q, language, forced_device):
             stitched = []
             chunks = job["chunks"]
             for i, (text, gap) in enumerate(chunks):
-                # Clean speech needs ~1.5 tokens/char; chunks that emit substantially
-                # more are padding with non-speech "garbage" tokens (the spooky
-                # drones/hiss, sometimes mid-chunk). Treat over-generation as the
-                # signal: regenerate (lower temperature wanders less) and KEEP THE
-                # FEWEST-TOKEN take — the cleanest one, with no garbage anywhere.
-                clean_budget = int(len(text) * 1.6) + 30
-                _cap["v"] = min(1000, int(len(text) * 1.9) + 120)  # bound each take
-                best_audio, best_tokens = None, 10 ** 9
-                for temp in (0.8, 0.5, 0.35):
-                    with torch.inference_mode():  # no autograd graph -> less memory
-                        wav = model.generate(
-                            text,
-                            language_id=language,
-                            audio_prompt_path=job["ref_path"],
-                            exaggeration=job["exaggeration"],
-                            cfg_weight=job["cfg_weight"],
-                            temperature=temp,
-                        )
-                    a = wav.squeeze(0).detach().to("cpu").numpy()
-                    del wav
-                    free()
-                    if _cap["last_tokens"] < best_tokens:
-                        best_audio, best_tokens = a, _cap["last_tokens"]
-                    if _cap["last_tokens"] <= clean_budget:   # no over-generation
-                        break
-                audio = best_audio
-                # Remove any trailing "ethereal" artifact the model appended after the
-                # speech, then declick the edges with a tiny fade.
-                audio = _trim_trailing(audio, model.sr)
-                n = min(int(model.sr * 0.015), audio.shape[0] // 2)
+                # Engine generates the cleanest take (best-of-N); shared post-processing.
+                audio, info = make_take(text, job)
+                # Remove any trailing artifact, then declick the edges with a tiny fade.
+                audio = _trim_trailing(audio, sr)
+                n = min(int(sr * 0.015), audio.shape[0] // 2)
                 if n > 0:
                     ramp = np.linspace(0.0, 1.0, n, dtype=audio.dtype)
                     audio[:n] *= ramp
                     audio[-n:] *= ramp[::-1]
 
                 if dbg_dir:
-                    dur = len(audio) / model.sr
-                    tok, cap = _cap["last_tokens"], _cap["v"]
-                    sf.write(os.path.join(dbg_dir, f"chunk_{i:02d}.wav"), audio, model.sr, format="WAV")
+                    dur = len(audio) / sr
+                    sf.write(os.path.join(dbg_dir, f"chunk_{i:02d}.wav"), audio, sr, format="WAV")
                     manifest.append(
-                        f"{i:02d}  start={cum:6.1f}s  dur={dur:5.1f}s  chars={len(text):4d}  "
-                        f"tokens={tok:4d}/{cap:<4d}{'  <-- CAP HIT' if tok >= cap else ''}\n"
+                        f"{i:02d}  start={cum:6.1f}s  dur={dur:5.1f}s  chars={len(text):4d}  {info}\n"
                         f"      {text[:90]}"
                     )
                     cum += dur + (gap if (i < len(chunks) - 1 and gap > 0) else 0)
 
                 stitched.append(audio)
                 if i < len(chunks) - 1 and gap > 0:
-                    stitched.append(np.zeros(int(model.sr * gap), dtype=audio.dtype))
+                    stitched.append(np.zeros(int(sr * gap), dtype=audio.dtype))
                 response_q.put({"type": "progress", "job_id": jid, "done": i + 1})
 
             if dbg_dir:
@@ -224,7 +277,7 @@ def _worker_main(request_q, response_q, language, forced_device):
 
             audio = np.concatenate(stitched) if len(stitched) > 1 else stitched[0]
             buf = io.BytesIO()
-            sf.write(buf, audio, model.sr, format="WAV")
+            sf.write(buf, audio, sr, format="WAV")
             response_q.put({"type": "done", "job_id": jid, "audio": buf.getvalue()})
         except Exception as e:
             response_q.put({"type": "error", "job_id": jid, "error": str(e)})
@@ -379,18 +432,16 @@ def _watchdog_loop():
 
 
 def _split_text(text, max_chars):
-    """Split text into (chunk_text, gap_after_seconds) chunks for generation.
+    """Split text into one (sentence, gap_after_seconds) per sentence.
 
-    The model pauses naturally at punctuation, so rather than splitting on every
-    paragraph (which makes short dialogue lines choppy), we pack sentences greedily
-    up to max_chars — but ensure each paragraph ends with terminal punctuation, so a
-    heading/title with none isn't run straight into the next sentence. Overlong
-    sentences are hard-split on word boundaries; the worker's token cap keeps any
-    single chunk from rambling.
+    One sentence per chunk → the stitched audio has a clear pause at every sentence
+    boundary (SENT_GAP within a paragraph, PARA_GAP at paragraph ends), which both
+    sounds natural and gives LingQ's auto-aligner an anchor at each sentence. A
+    punctuation-less paragraph end (e.g. a title) gets a period so it isn't run on.
+    Overlong sentences are hard-split on word boundaries.
     """
     import re
-    # Sentence units, with a period added to punctuation-less paragraph ends (titles).
-    units = []
+    out = []
     for para in re.split(r"\n\s*\n+", text.strip()):
         para = " ".join(para.split())
         if not para:
@@ -398,36 +449,25 @@ def _split_text(text, max_chars):
         sents = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", para) if s.strip()]
         if sents and sents[-1][-1] not in ".!?…:\"'»":
             sents[-1] += "."
-        units.extend(sents)
-
-    # Hard-split overlong sentences, then pack units greedily up to max_chars.
-    atoms = []
-    for u in units:
-        if len(u) <= max_chars:
-            atoms.append(u)
-            continue
-        buf = ""
-        for w in u.split():
-            if buf and len(buf) + len(w) + 1 > max_chars:
+        # Hard-split any sentence longer than a whole chunk on word boundaries.
+        atoms = []
+        for s in sents:
+            if len(s) <= max_chars:
+                atoms.append(s)
+                continue
+            buf = ""
+            for w in s.split():
+                if buf and len(buf) + len(w) + 1 > max_chars:
+                    atoms.append(buf)
+                    buf = ""
+                buf = f"{buf} {w}".strip()
+            if buf:
                 atoms.append(buf)
-                buf = ""
-            buf = f"{buf} {w}".strip()
-        if buf:
-            atoms.append(buf)
+        for j, a in enumerate(atoms):
+            out.append([a, PARA_GAP if j == len(atoms) - 1 else SENT_GAP])
 
-    chunks, cur = [], ""
-    for a in atoms:
-        if not cur:
-            cur = a
-        elif len(cur) + len(a) + 1 <= max_chars:
-            cur = f"{cur} {a}"
-        else:
-            chunks.append(cur)
-            cur = a
-    if cur:
-        chunks.append(cur)
-
-    out = [[c, SENT_GAP] for c in chunks] or [[text.strip(), 0.0]]
+    if not out:
+        out = [[text.strip(), 0.0]]
     out[-1][1] = 0.0  # no trailing gap on the very last chunk
     return out
 

@@ -1,0 +1,10 @@
+# XTTS-v2 engine (default). Install into .venv-xtts (see run.sh / README).
+coqui-tts
+# coqui-tts doesn't pin these and the latest break it — these versions work together:
+torch==2.8.0          # torch>=2.9 forces a torchcodec dependency that's painful on macOS
+torchaudio==2.8.0
+transformers>=4.57,<5.0   # needs both isin_mps_friendly (gone in 5.0) and is_torch_greater_or_equal
+spacy                 # required by XTTS enable_text_splitting (sentence segmentation)
+flask
+flask-cors
+soundfile
