@@ -85,8 +85,9 @@ animated stretch (~320s) for a livelier voice; `helmut_calm` uses the calmer int
 3. Restart the server. It appears in the voice grid automatically.
 
 ## Tips
-- **Ausdruck (expressiveness) ~0.5** is neutral. Lower = flatter/steadier, higher =
-  more dramatic. For language learning, keep it moderate.
+- **Ausdruck** (0.3–0.9, default 0.65) maps to XTTS **temperature**: higher = more
+  varied/expressive, lower = steadier/more even. For language learning, ~0.6–0.7 is a
+  good middle. (Under `TTS_ENGINE=chatterbox` it's used as that engine's `exaggeration`.)
 - Audio is generated as WAV and downloads as WAV. **Every generation is also
   auto-saved** to `output/<timestamp>_<voice>.wav` (gitignored) — your artifact archive.
 - **Long text** is split into **one sentence per chunk**, generated separately and

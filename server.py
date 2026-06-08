@@ -182,12 +182,14 @@ def _setup_xtts(device, language, free):
     gpt_cond, spk = model.get_conditioning_latents(audio_path=refs)
 
     def make_take(text, job):
-        # enable_text_splitting lets XTTS segment the chunk into sentences itself,
-        # which greatly reduces word/phrase SKIPPING. Generate a couple of takes and
-        # keep the most COMPLETE (longest) low-drone one — a skipped take is shorter,
-        # so "longest clean" favours the take that dropped nothing.
+        # "Ausdruck" maps to XTTS temperature (its expressiveness knob): higher = more
+        # varied/expressive, lower = steadier. enable_text_splitting lets XTTS segment
+        # the chunk itself (reduces word SKIPPING). Generate a couple of takes and keep
+        # the most COMPLETE (longest) low-drone one — a skipped take is shorter, so
+        # "longest clean" favours the take that dropped nothing.
+        base = min(0.95, max(0.3, float(job.get("exaggeration", 0.65))))
         cands = []
-        for temp in (0.7, 0.6):
+        for temp in (base, max(0.35, base - 0.15)):
             out = model.inference(
                 text, language, gpt_cond, spk,
                 temperature=temp, repetition_penalty=4.0, length_penalty=1.0,
@@ -200,7 +202,7 @@ def _setup_xtts(device, language, free):
             cands.append((a, _drone_seconds(a, sr)))
         clean = [c for c in cands if c[1] < 0.6] or cands
         a, bad = max(clean, key=lambda c: len(c[0]))  # longest clean = most complete
-        return a, f"dur={len(a) / sr:.1f}s drone={bad:.1f}s"
+        return a, f"temp={base:.2f} dur={len(a) / sr:.1f}s drone={bad:.1f}s"
 
     return sr, make_take
 
