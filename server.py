@@ -36,9 +36,11 @@ CHUNK_TIMEOUT = int(os.environ.get("TTS_CHUNK_TIMEOUT", "420"))
 # MPS peaks ~24GB generating this model; below this much total RAM it swaps and
 # crawls, so we auto-pick CPU instead (set TTS_DEVICE to override either way).
 MPS_MIN_RAM_GB = int(os.environ.get("TTS_MPS_MIN_RAM_GB", "32"))
-# Silence inserted between stitched chunks (a short beat; within-chunk pauses come
-# from the text's own punctuation).
-SENT_GAP = float(os.environ.get("TTS_SENT_GAP", "0.18"))
+# Clear pauses at sentence/paragraph boundaries. We generate one sentence per chunk
+# so the stitched audio has a detectable gap at EVERY sentence — an acoustic anchor
+# that LingQ's auto-aligner can re-snap to, instead of drifting across packed text.
+SENT_GAP = float(os.environ.get("TTS_SENT_GAP", "0.35"))
+PARA_GAP = float(os.environ.get("TTS_PARA_GAP", "0.6"))
 # Every generation is also saved here as <timestamp>_<voice>.wav (gitignored).
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
@@ -430,18 +432,16 @@ def _watchdog_loop():
 
 
 def _split_text(text, max_chars):
-    """Split text into (chunk_text, gap_after_seconds) chunks for generation.
+    """Split text into one (sentence, gap_after_seconds) per sentence.
 
-    The model pauses naturally at punctuation, so rather than splitting on every
-    paragraph (which makes short dialogue lines choppy), we pack sentences greedily
-    up to max_chars — but ensure each paragraph ends with terminal punctuation, so a
-    heading/title with none isn't run straight into the next sentence. Overlong
-    sentences are hard-split on word boundaries; the worker's token cap keeps any
-    single chunk from rambling.
+    One sentence per chunk → the stitched audio has a clear pause at every sentence
+    boundary (SENT_GAP within a paragraph, PARA_GAP at paragraph ends), which both
+    sounds natural and gives LingQ's auto-aligner an anchor at each sentence. A
+    punctuation-less paragraph end (e.g. a title) gets a period so it isn't run on.
+    Overlong sentences are hard-split on word boundaries.
     """
     import re
-    # Sentence units, with a period added to punctuation-less paragraph ends (titles).
-    units = []
+    out = []
     for para in re.split(r"\n\s*\n+", text.strip()):
         para = " ".join(para.split())
         if not para:
@@ -449,36 +449,25 @@ def _split_text(text, max_chars):
         sents = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", para) if s.strip()]
         if sents and sents[-1][-1] not in ".!?…:\"'»":
             sents[-1] += "."
-        units.extend(sents)
-
-    # Hard-split overlong sentences, then pack units greedily up to max_chars.
-    atoms = []
-    for u in units:
-        if len(u) <= max_chars:
-            atoms.append(u)
-            continue
-        buf = ""
-        for w in u.split():
-            if buf and len(buf) + len(w) + 1 > max_chars:
+        # Hard-split any sentence longer than a whole chunk on word boundaries.
+        atoms = []
+        for s in sents:
+            if len(s) <= max_chars:
+                atoms.append(s)
+                continue
+            buf = ""
+            for w in s.split():
+                if buf and len(buf) + len(w) + 1 > max_chars:
+                    atoms.append(buf)
+                    buf = ""
+                buf = f"{buf} {w}".strip()
+            if buf:
                 atoms.append(buf)
-                buf = ""
-            buf = f"{buf} {w}".strip()
-        if buf:
-            atoms.append(buf)
+        for j, a in enumerate(atoms):
+            out.append([a, PARA_GAP if j == len(atoms) - 1 else SENT_GAP])
 
-    chunks, cur = [], ""
-    for a in atoms:
-        if not cur:
-            cur = a
-        elif len(cur) + len(a) + 1 <= max_chars:
-            cur = f"{cur} {a}"
-        else:
-            chunks.append(cur)
-            cur = a
-    if cur:
-        chunks.append(cur)
-
-    out = [[c, SENT_GAP] for c in chunks] or [[text.strip(), 0.0]]
+    if not out:
+        out = [[text.strip(), 0.0]]
     out[-1][1] = 0.0  # no trailing gap on the very last chunk
     return out
 
