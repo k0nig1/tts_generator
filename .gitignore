@@ -18,6 +18,7 @@ venv/
 /*.wav
 tts_*.wav
 output/
+xtts_out/
 
 # Local env overrides
 .env

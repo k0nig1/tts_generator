@@ -1,51 +1,36 @@
 # Deutsch TTS — Local German Text-to-Speech UI
 
-Free, local, no API keys. Powered by **Chatterbox Multilingual** (Resemble AI, MIT) —
-open-source TTS that beats ElevenLabs in blind tests, with **native German** and
-voice cloning from a short reference clip.
+Free, local, no API keys. German voice **cloned** from a short reference clip in
+[`voices/`](voices/), so a "preset" is a named German speaker sample, not a canned voice.
 
-Voices are real reference clips in [`voices/`](voices/), cloned at synthesis time —
-so a "preset" is a named German speaker sample, not a canned model voice.
+**Two engines** (select with `TTS_ENGINE`):
+- **XTTS-v2** (coqui-tts) — **default**. Steady and ~real-time on CPU; best for
+  long-form German. License: CPML (**non-commercial**).
+- **Chatterbox Multilingual** (Resemble AI, MIT) — more expressive, but ~4–5× slower
+  on CPU and prone to occasional artifacts (drones/skips) on long text.
 
-## Setup (one time)
+## Setup & run
 
-Requires **Python 3.11** (Chatterbox/PyTorch don't support newer yet). The steps
-below use [`uv`](https://github.com/astral-sh/uv) to keep it isolated from your
-system Python.
-
-### 1. Create the environment + install deps
+Requires **Python 3.11** and [`uv`](https://github.com/astral-sh/uv). One command —
+it creates the engine's isolated venv on first run, starts the server, and opens the
+browser:
 ```bash
-uv venv --python 3.11 .venv
-uv pip install --python .venv -r requirements.txt
+./run.sh                         # XTTS (default)  -> .venv-xtts
+TTS_ENGINE=chatterbox ./run.sh   # Chatterbox      -> .venv
 ```
-This pulls PyTorch and the Chatterbox model code (~a few GB).
+First launch downloads the model (~1.8 GB XTTS / ~2 GB Chatterbox) automatically.
+The model loads in a background worker; the header status dot turns green when ready.
 
-### 2. Start the server
-
-Quickest — one command that sets up the venv on first run, starts the server, and
-opens the browser when ready:
-```bash
-./run.sh
-```
-
-Or manually:
-```bash
-source .venv/bin/activate
-python server.py
-```
-- First launch downloads the multilingual checkpoint (~2 GB) automatically.
-- The model is hosted **in-process** — there is no separate engine to run.
-- On boot it warms the model in a background thread; the header status dot turns
-  green once it's ready.
-
-### 3. Open the UI
-http://localhost:5050
+UI: **http://localhost:5050**
 
 ---
 
 ## Device selection (Apple Silicon)
 
-The server auto-selects: CUDA → MPS (only if the machine has enough RAM) → CPU.
+**XTTS** runs on **CPU** on Apple Silicon (its MPS support is unreliable) at ~1× real
+time — fast enough that this is fine. The notes below are mainly about **Chatterbox**,
+which is heavier. The server auto-selects: CUDA → MPS (only if the machine has enough
+RAM) → CPU.
 
 **Why the RAM check:** generating this model on **MPS peaks ~24 GB** of unified
 memory. On a Mac with less than ~32 GB that overflows into swap, which both *crawls*
@@ -104,12 +89,18 @@ animated stretch (~320s) for a livelier voice; `helmut_calm` uses the calmer int
   more dramatic. For language learning, keep it moderate.
 - Audio is generated as WAV and downloads as WAV. **Every generation is also
   auto-saved** to `output/<timestamp>_<voice>.wav` (gitignored) — your artifact archive.
-- A punctuation-less paragraph (e.g. a title/heading) gets a period appended so the
-  narrator pauses instead of running it into the next sentence. Pauses otherwise come
-  from the text's own punctuation; the small gap between chunks is `TTS_SENT_GAP`.
-- **Long text** is auto-split into ≤400-char chunks (sentence boundaries) so it
-  won't exhaust memory; the UI shows a per-chunk progress bar ("Teil 3 / 11").
-  Tune the chunk size with `TTS_MAX_CHARS=300 python server.py` if you hit OOM.
+- **Long text** is split into **one sentence per chunk**, generated separately and
+  stitched with a clear pause at each sentence (`TTS_SENT_GAP` 0.35s) and paragraph
+  (`TTS_PARA_GAP` 0.6s). The UI shows a per-chunk progress bar ("Teil 3 / 11"). A
+  punctuation-less paragraph (e.g. a title) gets a period appended so it pauses.
+
+## Using the audio in LingQ (sync caveat)
+
+LingQ auto-aligns imported audio to text and **cannot import external timestamps**, so
+its sentence highlight tends to **drift** on any synthetic audio (a known LingQ
+limitation, not specific to this tool). The per-sentence pauses above give its aligner
+the best chance, but sync isn't guaranteed. **Workaround:** import **shorter lessons**
+(per paragraph/scene) so alignment error can't accumulate far before the next anchor.
 - **Abbrechen** hard-cancels a running synthesis: it kills the generation worker
   process (instantly freeing the GPU), then respawns it — so the next generation
   waits ~10s for the model to reload. Use it to stop a runaway/too-long generation.
